@@ -13,8 +13,10 @@ class VideoComparerApp:
         self.master.title("Video Frame Comparer with Drag-and-Drop")
         self.video_files = []
         self.processed_count = 0
+        self.total_files = 0
+        self.executor = ThreadPoolExecutor(max_workers=4)
 
-        # Main top frame
+        # Main frame
         self.frame = tk.Frame(master)
         self.frame.pack(pady=10)
 
@@ -24,19 +26,19 @@ class VideoComparerApp:
         self.start_button = tk.Button(self.frame, text="Start Comparison", command=self.start_comparison)
         self.start_button.pack(side=tk.LEFT, padx=10)
 
-        # Interval input
+        # Interval
         self.interval_label = tk.Label(self.frame, text="Interval (s):")
         self.interval_label.pack(side=tk.LEFT, padx=(20, 5))
 
-        self.interval_var = tk.StringVar(value="5")  # Default interval
+        self.interval_var = tk.StringVar(value="5")
         self.interval_entry = tk.Entry(self.frame, textvariable=self.interval_var, width=5)
         self.interval_entry.pack(side=tk.LEFT)
 
-        # Duration limit input
+        # Max duration
         self.duration_label = tk.Label(self.frame, text="Max Duration (s):")
         self.duration_label.pack(side=tk.LEFT, padx=(20, 5))
 
-        self.duration_var = tk.StringVar(value="")  # Optional max duration
+        self.duration_var = tk.StringVar(value="")
         self.duration_entry = tk.Entry(self.frame, textvariable=self.duration_var, width=7)
         self.duration_entry.pack(side=tk.LEFT)
 
@@ -48,13 +50,12 @@ class VideoComparerApp:
         self.listbox = tk.Listbox(master, width=80)
         self.listbox.pack(padx=10, pady=10)
 
-        # Status label
         self.status_label = tk.Label(master, text="Ready")
         self.status_label.pack()
 
-        # Drag-and-drop support
+        # Drag and drop
         self.listbox.drop_target_register(DND_FILES)
-        self.listbox.dnd_bind('<<Drop>>', self.drop_files)
+        self.listbox.dnd_bind("<<Drop>>", self.drop_files)
 
         drop_label = tk.Label(master, text="💡 Drag and drop video files onto the list above.")
         drop_label.pack()
@@ -80,7 +81,7 @@ class VideoComparerApp:
             messagebox.showwarning("No Videos", "Please add video files first.")
             return
 
-        # Validate interval input
+        # Validate interval
         try:
             interval_seconds = float(self.interval_var.get().strip())
             if interval_seconds <= 0:
@@ -89,7 +90,7 @@ class VideoComparerApp:
             messagebox.showerror("Invalid Interval", "Please enter a valid number of seconds (e.g. 5).")
             return
 
-        # Optional: Validate max duration
+        # Validate max duration
         duration_seconds = None
         duration_raw = self.duration_var.get().strip()
         if duration_raw:
@@ -98,26 +99,26 @@ class VideoComparerApp:
                 if duration_seconds <= 0:
                     raise ValueError()
             except ValueError:
-                messagebox.showerror("Invalid Duration", "Max duration must be in seconds (e.g. 600 for 10 minutes).")
+                messagebox.showerror("Invalid Duration", "Max duration must be in seconds (e.g. 600).")
                 return
 
-        # Set up output
+        # Set up
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        self.base_dir = Path.cwd() / f"video_comparison_{timestamp}"
+        self.base_dir = Path.cwd() / f"out_{timestamp}"
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
-        # UI states
         self.progress["maximum"] = len(self.video_files)
         self.progress["value"] = 0
         self.processed_count = 0
+        self.total_files = len(self.video_files)
+
         self.add_button.config(state=tk.DISABLED)
         self.start_button.config(state=tk.DISABLED)
         self.status_label.config(text="Processing...")
 
-        # Start threaded work
-        with ThreadPoolExecutor() as executor:
-            for idx, video in enumerate(self.video_files):
-                executor.submit(self.process_video, idx, video, interval_seconds, duration_seconds)
+        # Start all jobs (non-blocking)
+        for idx, video in enumerate(self.video_files):
+            self.executor.submit(self.process_video, idx, video, interval_seconds, duration_seconds)
 
     def process_video(self, idx, video, interval_seconds, duration_seconds):
         input_path = Path(video)
@@ -127,9 +128,8 @@ class VideoComparerApp:
 
         output_pattern = out_dir / f"frame_%03d_{safe_name}.png"
 
-        print(f"[{input_path.name}] Starting frame extraction...")
+        print(f"[{input_path.name}] Extracting frames...")
 
-        # Construct ffmpeg command
         ffmpeg_cmd = [
             "ffmpeg",
             "-hide_banner",
@@ -147,23 +147,26 @@ class VideoComparerApp:
 
         try:
             subprocess.run(ffmpeg_cmd, check=True)
-            print(f"[{input_path.name}] ✅ Frames saved to {out_dir}")
+            print(f"[{input_path.name}] ✅ Done.")
         except subprocess.CalledProcessError as e:
             print(f"[{input_path.name}] ❌ Error: {e}")
 
-        # Update progress safely from thread
+        # Schedule progress update from Tkinter-safe thread
         self.master.after(0, self.update_progress)
 
     def update_progress(self):
         self.processed_count += 1
         self.progress["value"] = self.processed_count
-        self.status_label.config(text=f"Processed {self.processed_count}/{len(self.video_files)}")
+        self.status_label.config(text=f"Processed {self.processed_count}/{self.total_files}")
 
-        if self.processed_count == len(self.video_files):
+        if self.processed_count == self.total_files:
+            self.progress["value"] = self.total_files
+            self.status_label.config(text="✅ All videos processed.")
             self.add_button.config(state=tk.NORMAL)
             self.start_button.config(state=tk.NORMAL)
-            self.status_label.config(text="✅ Done!")
-            messagebox.showinfo("Done", f"Comparison frames saved to:\n{self.base_dir}")
+            messagebox.showinfo("Done", f"Frames saved to:\n{self.base_dir}")
+            self.video_files.clear()
+            self.listbox.delete(0, tk.END)
 
 
 if __name__ == "__main__":

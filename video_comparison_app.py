@@ -18,6 +18,7 @@ class VideoComparerApp:
         self.executor = ThreadPoolExecutor(max_workers=4)
         self.ffmpeg_processes = {}
         self.stop_requested = False
+        self.file_progress_values = {}
 
         # Main frame
         self.frame = tk.Frame(master)
@@ -64,7 +65,7 @@ class VideoComparerApp:
         self.file_progress_label = tk.Label(master, textvariable=self.file_progress_var)
         self.file_progress_label.pack()
 
-        # Drag and drop
+        # Drag-and-drop
         self.listbox.drop_target_register(DND_FILES)
         self.listbox.dnd_bind("<<Drop>>", self.drop_files)
 
@@ -113,12 +114,12 @@ class VideoComparerApp:
                 messagebox.showerror("Invalid Duration", "Max duration must be in seconds (e.g. 600).")
                 return
 
-        # Set up
+        # Setup output
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         self.base_dir = Path.cwd() / f"out_{timestamp}"
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
-        self.progress["maximum"] = len(self.video_files)
+        self.progress["maximum"] = 100
         self.progress["value"] = 0
         self.processed_count = 0
         self.total_files = len(self.video_files)
@@ -130,8 +131,9 @@ class VideoComparerApp:
         self.stop_requested = False
         self.ffmpeg_processes.clear()
         self.file_progress_var.set("")
+        self.file_progress_values.clear()
 
-        # Start all jobs (non-blocking)
+        # Start extraction threads
         for idx, video in enumerate(self.video_files):
             self.executor.submit(self.process_video, idx, video, interval_seconds, duration_seconds)
 
@@ -195,13 +197,29 @@ class VideoComparerApp:
         except Exception:
             return 0
 
+    def update_file_progress_label(self, filename, percent_str):
+        self.file_progress_var.set(f"{filename}: {percent_str}")
+        try:
+            percent = int(percent_str.replace("%", ""))
+        except ValueError:
+            percent = 0
+        self.file_progress_values[filename] = percent
+        self.update_overall_progress_bar()
+
+    def update_overall_progress_bar(self):
+        if not self.file_progress_values:
+            return
+        total_percent = sum(self.file_progress_values.values())
+        num_files = self.total_files if self.total_files > 0 else 1
+        average_percent = total_percent / num_files
+        self.progress["value"] = average_percent
+
     def update_progress(self):
         self.processed_count += 1
-        self.progress["value"] = self.processed_count
         self.status_label.config(text=f"Processed {self.processed_count}/{self.total_files}")
 
         if self.processed_count == self.total_files or self.stop_requested:
-            self.progress["value"] = self.total_files
+            self.progress["value"] = 100
             self.status_label.config(text="Done." if not self.stop_requested else "Aborted.")
             self.add_button.config(state=tk.NORMAL)
             self.start_button.config(state=tk.NORMAL)
@@ -213,9 +231,7 @@ class VideoComparerApp:
             self.video_files.clear()
             self.listbox.delete(0, tk.END)
             self.file_progress_var.set("")
-
-    def update_file_progress_label(self, filename, percent):
-        self.file_progress_var.set(f"{filename}: {percent}")
+            self.file_progress_values.clear()
 
     def abort_processing(self):
         self.stop_requested = True

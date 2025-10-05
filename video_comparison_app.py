@@ -12,18 +12,18 @@ import datetime
 class VideoComparerApp:
     def __init__(self, master):
         self.master = master
-        self.master.title("Video Frame Comparer")
+        self.master.title("Video Frame Comparer with Drag-and-Drop")
         self.video_files = []
         self.processed_count = 0
         self.total_files = 0
         self.executor = ThreadPoolExecutor(max_workers=4)
         self.ffmpeg_processes = {}
         self.stop_requested = False
-        self.row_ids = {}  # Maps file path -> Treeview item ID
+        self.row_ids = {}
 
-        # Main controls
+        # Main frame
         self.frame = tk.Frame(master)
-        self.frame.pack(pady=10)
+        self.frame.pack(pady=10, fill="x")
 
         self.add_button = tk.Button(self.frame, text="Add Video(s)", command=self.add_files)
         self.add_button.pack(side=tk.LEFT, padx=10)
@@ -34,7 +34,7 @@ class VideoComparerApp:
         self.stop_button = tk.Button(self.frame, text="Stop", command=self.abort_processing, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=10)
 
-        # Interval
+        # Interval and Duration
         self.interval_label = tk.Label(self.frame, text="Interval (s):")
         self.interval_label.pack(side=tk.LEFT, padx=(20, 5))
 
@@ -42,7 +42,6 @@ class VideoComparerApp:
         self.interval_entry = tk.Entry(self.frame, textvariable=self.interval_var, width=5)
         self.interval_entry.pack(side=tk.LEFT)
 
-        # Max duration
         self.duration_label = tk.Label(self.frame, text="Max Duration (s):")
         self.duration_label.pack(side=tk.LEFT, padx=(20, 5))
 
@@ -52,30 +51,31 @@ class VideoComparerApp:
 
         # Progress bar
         self.progress = ttk.Progressbar(master, orient="horizontal", length=500, mode="determinate")
-        self.progress.pack(pady=(10, 0))
+        self.progress.pack(pady=(10, 0), padx=10, fill="x")
 
-        # Treeview table for per-file status
-        self.tree = ttk.Treeview(master, columns=("progress", "time", "eta"), show="headings", height=10)
+        # Treeview with columns
+        self.tree = ttk.Treeview(master, columns=("file", "progress", "time", "eta"), show="headings", height=10)
+        self.tree.heading("file", text="File")
         self.tree.heading("progress", text="Progress")
         self.tree.heading("time", text="Time")
         self.tree.heading("eta", text="ETA")
-        self.tree.heading("#1", anchor="w")
+
+        self.tree.column("file", width=250, anchor="w")
         self.tree.column("progress", width=80, anchor="center")
         self.tree.column("time", width=80, anchor="center")
         self.tree.column("eta", width=80, anchor="center")
-        self.tree.pack(padx=10, pady=10, fill="both", expand=False)
+        self.tree.pack(padx=10, pady=10, fill="both", expand=True)
 
-        self.tree.heading("#0", text="File", anchor="w")
-
-        # Status label
+        # Status
         self.status_label = tk.Label(master, text="Ready")
-        self.status_label.pack(pady=(0, 10))
+        self.status_label.pack(pady=(0, 10), padx=10, anchor="w")
 
         # Drag-and-drop support
         self.tree.drop_target_register(DND_FILES)
         self.tree.dnd_bind("<<Drop>>", self.drop_files)
 
-        master.resizable(False, False)  # Prevent resize flicker
+        # Allow window resizing
+        master.resizable(True, True)
 
     def add_files(self):
         files = filedialog.askopenfilenames(filetypes=[("Video files", "*.mp4 *.mkv *.mov *.avi *.flv")])
@@ -89,20 +89,20 @@ class VideoComparerApp:
         for f in files:
             if f not in self.video_files and Path(f).suffix.lower() in {'.mp4', '.mkv', '.mov', '.avi', '.flv'}:
                 filename = Path(f).name
-                row_id = self.tree.insert("", "end", text=filename, values=("", "", ""))
+                row_id = self.tree.insert("", "end", values=(filename, "", "", ""))
                 self.row_ids[f] = row_id
                 self.video_files.append(f)
 
     def get_video_duration(self, video_path):
         try:
             result = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
-                 "default=noprint_wrappers=1:nokey=1", str(video_path)],
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(video_path)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
             )
             return float(result.stdout.strip())
         except Exception as e:
-            print(f"⚠️ FFprobe failed for {video_path}: {e}")
+            print(f"FFprobe error for {video_path}: {e}")
             return None
 
     def start_comparison(self):
@@ -125,7 +125,7 @@ class VideoComparerApp:
                 if duration_seconds <= 0:
                     raise ValueError()
             except ValueError:
-                messagebox.showerror("Invalid Duration", "Please enter a positive number.")
+                messagebox.showerror("Invalid Duration", "Please enter a positive duration.")
                 return
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -163,7 +163,8 @@ class VideoComparerApp:
             *duration_arg,
             "-i", str(video),
             "-vf", f"fps=1/{interval_seconds}",
-            "-progress", "pipe:1", "-nostats",
+            "-progress", "pipe:1",
+            "-nostats",
             str(output_pattern)
         ]
 
@@ -185,7 +186,8 @@ class VideoComparerApp:
                     if max_out_time:
                         progress = min(current_out_time / max_out_time, 1.0)
                         percent = int(progress * 100)
-                        eta_seconds = int((time.time() - start_time) / progress - (time.time() - start_time)) if progress > 0 else 0
+                        elapsed = time.time() - start_time
+                        eta_seconds = int(elapsed / progress - elapsed) if progress > 0 else 0
                         eta_str = str(datetime.timedelta(seconds=eta_seconds))
 
                     self.master.after(0, self.update_row_progress, video, percent, time_str, eta_str)
@@ -195,7 +197,7 @@ class VideoComparerApp:
 
             process.wait()
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"Error while processing {video}: {e}")
         finally:
             self.master.after(0, self.handle_video_completion)
 
@@ -208,26 +210,33 @@ class VideoComparerApp:
             return 0
 
     def update_row_progress(self, filepath, percent, time_txt, eta_txt):
-        item_id = self.row_ids.get(filepath)
-        if item_id:
-            self.tree.item(item_id, values=(f"{percent}%", time_txt, eta_txt))
+        row_id = self.row_ids.get(filepath)
+        if row_id:
+            self.tree.set(row_id, "progress", f"{percent}%")
+            self.tree.set(row_id, "time", time_txt)
+            self.tree.set(row_id, "eta", eta_txt)
 
         self.update_overall_progress()
 
     def update_overall_progress(self):
-        values = [
-            int(self.tree.item(iid)["values"][0].replace("%", "") or 0)
-            for iid in self.tree.get_children()
-        ]
-        average = sum(values) / len(values) if values else 0
-        self.progress["value"] = average
+        values = []
+        for row in self.tree.get_children():
+            try:
+                percent = int(self.tree.item(row, "values")[1].replace("%", ""))
+                values.append(percent)
+            except:
+                values.append(0)
+
+        if values:
+            avg = sum(values) / len(values)
+            self.progress["value"] = avg
 
     def handle_video_completion(self):
         self.processed_count += 1
         self.status_label.config(text=f"Processed {self.processed_count}/{self.total_files}")
 
         if self.processed_count == self.total_files or self.stop_requested:
-            self.status_label.config(text="Complete." if not self.stop_requested else "Aborted.")
+            self.status_label.config(text="Done." if not self.stop_requested else "Aborted.")
             self.add_button.config(state=tk.NORMAL)
             self.start_button.config(state=tk.NORMAL)
             self.stop_button.config(state=tk.DISABLED)
@@ -237,6 +246,8 @@ class VideoComparerApp:
 
             self.video_files.clear()
             self.ffmpeg_processes.clear()
+            self.row_ids.clear()
+            self.tree.delete(*self.tree.get_children())
 
     def abort_processing(self):
         self.stop_requested = True

@@ -3,9 +3,7 @@
 A desktop GUI application for extracting frames from video files at fixed time intervals. Built with Python and Tkinter, this drag-and-drop-enabled tool allows you to:
 
 - Set a time interval (e.g., capture 1 frame every 5 seconds)
-- Optionally limit the extraction to a fixed duration (e.g., only the first 10 minutes)
-- Process multiple videos at once
-- Track progress using a progress bar
+- Optionally limit the extraction to a fixed duration (e.g., only the first 10 minutes → 600 seconds)
 - Save output frames in organized folders per file
 
 This tool is designed to be frame-rate agnostic and works well for extracting thumbnails, analyzing video content, or comparing scenes across different videos.

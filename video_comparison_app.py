@@ -5,6 +5,7 @@ import subprocess
 import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+import shlex
 
 
 class VideoComparerApp:
@@ -15,6 +16,8 @@ class VideoComparerApp:
         self.processed_count = 0
         self.total_files = 0
         self.executor = ThreadPoolExecutor(max_workers=4)
+        self.ffmpeg_processes = {}
+        self.stop_requested = False
 
         # Main frame
         self.frame = tk.Frame(master)
@@ -25,6 +28,9 @@ class VideoComparerApp:
 
         self.start_button = tk.Button(self.frame, text="Start Comparison", command=self.start_comparison)
         self.start_button.pack(side=tk.LEFT, padx=10)
+
+        self.stop_button = tk.Button(self.frame, text="Stop", command=self.abort_processing, state=tk.DISABLED)
+        self.stop_button.pack(side=tk.LEFT, padx=10)
 
         # Interval
         self.interval_label = tk.Label(self.frame, text="Interval (s):")
@@ -50,14 +56,19 @@ class VideoComparerApp:
         self.listbox = tk.Listbox(master, width=80)
         self.listbox.pack(padx=10, pady=10)
 
+        # Status labels
         self.status_label = tk.Label(master, text="Ready")
         self.status_label.pack()
+
+        self.file_progress_var = tk.StringVar(value="")
+        self.file_progress_label = tk.Label(master, textvariable=self.file_progress_var)
+        self.file_progress_label.pack()
 
         # Drag and drop
         self.listbox.drop_target_register(DND_FILES)
         self.listbox.dnd_bind("<<Drop>>", self.drop_files)
 
-        drop_label = tk.Label(master, text="💡 Drag and drop video files onto the list above.")
+        drop_label = tk.Label(master, text="Drag and drop video files onto the list above.")
         drop_label.pack()
 
     def add_files(self):
@@ -114,7 +125,11 @@ class VideoComparerApp:
 
         self.add_button.config(state=tk.DISABLED)
         self.start_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
         self.status_label.config(text="Processing...")
+        self.stop_requested = False
+        self.ffmpeg_processes.clear()
+        self.file_progress_var.set("")
 
         # Start all jobs (non-blocking)
         for idx, video in enumerate(self.video_files):
@@ -128,45 +143,91 @@ class VideoComparerApp:
 
         output_pattern = out_dir / f"frame_%03d_{safe_name}.png"
 
-        print(f"[{input_path.name}] Extracting frames...")
+        duration_arg = ["-t", str(duration_seconds)] if duration_seconds else []
 
         ffmpeg_cmd = [
             "ffmpeg",
             "-hide_banner",
             "-loglevel", "error",
-            "-i", str(video)
+            *duration_arg,
+            "-i", str(video),
+            "-vf", f"fps=1/{interval_seconds}",
+            "-progress", "pipe:1",
+            "-nostats",
+            str(output_pattern)
         ]
 
-        if duration_seconds:
-            ffmpeg_cmd.extend(["-t", str(duration_seconds)])
-
-        ffmpeg_cmd.extend([
-            "-vf", f"fps=1/{interval_seconds}",
-            str(output_pattern)
-        ])
-
         try:
-            subprocess.run(ffmpeg_cmd, check=True)
-            print(f"[{input_path.name}] ✅ Done.")
-        except subprocess.CalledProcessError as e:
-            print(f"[{input_path.name}] ❌ Error: {e}")
+            process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            self.ffmpeg_processes[str(video)] = process
 
-        # Schedule progress update from Tkinter-safe thread
-        self.master.after(0, self.update_progress)
+            max_out_time = duration_seconds if duration_seconds else None
+
+            for line in process.stdout:
+                line = line.strip()
+                if line.startswith("out_time_ms"):
+                    value = line.split("=")[1].strip()
+                    ms = self.safe_parse_ms(value)
+                    current_out_time = ms / 1_000_000
+
+                    if max_out_time:
+                        progress = min(current_out_time / max_out_time, 1.0)
+                        percent_str = f"{int(progress * 100)}%"
+                        self.master.after(0, self.update_file_progress_label, input_path.name, percent_str)
+
+                if "progress=end" in line:
+                    break
+
+            process.wait()
+
+            if not self.stop_requested:
+                print(f"[{input_path.name}] ✅ Done.")
+        except Exception as e:
+            print(f"[{input_path.name}] ❌ Error: {e}")
+        finally:
+            self.master.after(0, self.update_progress)
+
+    def safe_parse_ms(self, value):
+        try:
+            if value.lower() == "n/a" or not value:
+                return 0
+            return int(float(value))
+        except Exception:
+            return 0
 
     def update_progress(self):
         self.processed_count += 1
         self.progress["value"] = self.processed_count
         self.status_label.config(text=f"Processed {self.processed_count}/{self.total_files}")
 
-        if self.processed_count == self.total_files:
+        if self.processed_count == self.total_files or self.stop_requested:
             self.progress["value"] = self.total_files
-            self.status_label.config(text="✅ All videos processed.")
+            self.status_label.config(text="Done." if not self.stop_requested else "Aborted.")
             self.add_button.config(state=tk.NORMAL)
             self.start_button.config(state=tk.NORMAL)
-            messagebox.showinfo("Done", f"Frames saved to:\n{self.base_dir}")
+            self.stop_button.config(state=tk.DISABLED)
+
+            if not self.stop_requested:
+                messagebox.showinfo("Done", f"Frames saved to:\n{self.base_dir}")
+
             self.video_files.clear()
             self.listbox.delete(0, tk.END)
+            self.file_progress_var.set("")
+
+    def update_file_progress_label(self, filename, percent):
+        self.file_progress_var.set(f"{filename}: {percent}")
+
+    def abort_processing(self):
+        self.stop_requested = True
+        self.status_label.config(text="Aborting...")
+        self.stop_button.config(state=tk.DISABLED)
+
+        for key, proc in self.ffmpeg_processes.items():
+            if proc.poll() is None:
+                print(f"Terminating: {key}")
+                proc.terminate()
+
+        self.file_progress_var.set("Aborted by user.")
 
 
 if __name__ == "__main__":

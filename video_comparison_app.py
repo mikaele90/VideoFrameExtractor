@@ -137,6 +137,25 @@ class VideoComparerApp:
         for idx, video in enumerate(self.video_files):
             self.executor.submit(self.process_video, idx, video, interval_seconds, duration_seconds)
 
+    def get_video_duration(self, video_path):
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    str(video_path)
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            duration_str = result.stdout.strip()
+            return float(duration_str)
+        except Exception as e:
+            print(f"❌ FFprobe failed for {video_path}: {e}")
+            return None
+
     def process_video(self, idx, video, interval_seconds, duration_seconds):
         input_path = Path(video)
         safe_name = input_path.stem.replace(" ", "_")
@@ -144,6 +163,12 @@ class VideoComparerApp:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         output_pattern = out_dir / f"frame_%03d_{safe_name}.png"
+
+        # Use provided duration or fetch with ffprobe
+        if duration_seconds:
+            max_out_time = duration_seconds
+        else:
+            max_out_time = self.get_video_duration(video)
 
         duration_arg = ["-t", str(duration_seconds)] if duration_seconds else []
 
@@ -163,8 +188,6 @@ class VideoComparerApp:
             process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             self.ffmpeg_processes[str(video)] = process
 
-            max_out_time = duration_seconds if duration_seconds else None
-
             for line in process.stdout:
                 line = line.strip()
                 if line.startswith("out_time_ms"):
@@ -172,10 +195,12 @@ class VideoComparerApp:
                     ms = self.safe_parse_ms(value)
                     current_out_time = ms / 1_000_000
 
-                    if max_out_time:
+                    if max_out_time and max_out_time > 0:
                         progress = min(current_out_time / max_out_time, 1.0)
                         percent_str = f"{int(progress * 100)}%"
                         self.master.after(0, self.update_file_progress_label, input_path.name, percent_str)
+                    else:
+                        self.master.after(0, self.update_file_progress_label, input_path.name, "...")
 
                 if "progress=end" in line:
                     break

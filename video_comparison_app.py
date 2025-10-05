@@ -201,7 +201,8 @@ class VideoComparerApp:
         total = self.total_frame_estimates.get(file_path, 1)
         percent = min(int((current / total) * 100), 100)
 
-        self.tree.set(row_id, "frames", f"{current} / {total}")
+        display_current = min(current, total)  # Avoid showing N/N+1
+        self.tree.set(row_id, "frames", f"{display_current} / {total}")
         self.tree.set(row_id, "progress", f"{percent}%")
         self.update_overall_progress()
 

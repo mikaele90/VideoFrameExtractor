@@ -3,25 +3,28 @@ from tkinter import ttk, filedialog, messagebox
 from tkinterdnd2 import DND_FILES, TkinterDnD
 import subprocess
 import time
+import datetime
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-import shlex
-import datetime
+import math
+import re
 
 
 class VideoComparerApp:
     def __init__(self, master):
         self.master = master
-        self.master.title("Video Frame Comparer with Drag-and-Drop")
+        self.master.title("Video Frame Comparer")
         self.video_files = []
+        self.executor = ThreadPoolExecutor(max_workers=4)
         self.processed_count = 0
         self.total_files = 0
-        self.executor = ThreadPoolExecutor(max_workers=4)
-        self.ffmpeg_processes = {}
         self.stop_requested = False
-        self.row_ids = {}
 
-        # Main frame
+        self.row_ids = {}
+        self.frame_counts = {}
+        self.total_frame_estimates = {}
+
+        # Frame + buttons
         self.frame = tk.Frame(master)
         self.frame.pack(pady=10, fill="x")
 
@@ -34,7 +37,6 @@ class VideoComparerApp:
         self.stop_button = tk.Button(self.frame, text="Stop", command=self.abort_processing, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=10)
 
-        # Interval and Duration
         self.interval_label = tk.Label(self.frame, text="Interval (s):")
         self.interval_label.pack(side=tk.LEFT, padx=(20, 5))
 
@@ -53,32 +55,30 @@ class VideoComparerApp:
         self.progress = ttk.Progressbar(master, orient="horizontal", length=500, mode="determinate")
         self.progress.pack(pady=(10, 0), padx=10, fill="x")
 
-        # Treeview with columns
-        self.tree = ttk.Treeview(master, columns=("file", "progress", "time", "eta"), show="headings", height=10)
+        # Treeview
+        self.tree = ttk.Treeview(master, columns=("file", "frames", "progress"), show="headings", height=12)
         self.tree.heading("file", text="File")
+        self.tree.heading("frames", text="Frames")
         self.tree.heading("progress", text="Progress")
-        self.tree.heading("time", text="Time")
-        self.tree.heading("eta", text="ETA")
-
         self.tree.column("file", width=250, anchor="w")
-        self.tree.column("progress", width=80, anchor="center")
-        self.tree.column("time", width=80, anchor="center")
-        self.tree.column("eta", width=80, anchor="center")
+        self.tree.column("frames", width=100, anchor="center")
+        self.tree.column("progress", width=100, anchor="center")
         self.tree.pack(padx=10, pady=10, fill="both", expand=True)
 
-        # Status
+        # Status label
         self.status_label = tk.Label(master, text="Ready")
         self.status_label.pack(pady=(0, 10), padx=10, anchor="w")
 
-        # Drag-and-drop support
+        # Drag-and-drop
         self.tree.drop_target_register(DND_FILES)
         self.tree.dnd_bind("<<Drop>>", self.drop_files)
 
-        # Allow window resizing
         master.resizable(True, True)
 
     def add_files(self):
-        files = filedialog.askopenfilenames(filetypes=[("Video files", "*.mp4 *.mkv *.mov *.avi *.flv")])
+        files = filedialog.askopenfilenames(filetypes=[
+            ("Video files", "*.mp4 *.mkv *.mov *.avi *.flv")
+        ])
         self.add_to_list(files)
 
     def drop_files(self, event):
@@ -86,36 +86,41 @@ class VideoComparerApp:
         self.add_to_list(files)
 
     def add_to_list(self, files):
-        for f in files:
-            if f not in self.video_files and Path(f).suffix.lower() in {'.mp4', '.mkv', '.mov', '.avi', '.flv'}:
-                filename = Path(f).name
-                row_id = self.tree.insert("", "end", values=(filename, "", "", ""))
-                self.row_ids[f] = row_id
-                self.video_files.append(f)
+        for file in files:
+            if file not in self.video_files and Path(file).suffix.lower() in {'.mp4', '.mkv', '.mov', '.avi', '.flv'}:
+                name = Path(file).name
+                row_id = self.tree.insert("", "end", values=(name, "0 / ?", "0%"))
+                self.row_ids[file] = row_id
+                self.video_files.append(file)
 
-    def get_video_duration(self, video_path):
+    def get_video_duration(self, path):
         try:
             result = subprocess.run(
                 ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", str(video_path)],
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
             )
             return float(result.stdout.strip())
         except Exception as e:
-            print(f"FFprobe error for {video_path}: {e}")
+            print(f"ffprobe error: {e}")
             return None
+
+    def estimate_frame_count(self, duration, interval):
+        if duration and interval:
+            return math.floor(duration / interval) + 1  # include frame at 0s
+        return 0
 
     def start_comparison(self):
         if not self.video_files:
-            messagebox.showwarning("No Videos", "Please add video files first.")
+            messagebox.showwarning("No Videos", "Please add videos first.")
             return
 
         try:
-            interval_seconds = float(self.interval_var.get().strip())
-            if interval_seconds <= 0:
+            interval = float(self.interval_var.get().strip())
+            if interval <= 0:
                 raise ValueError()
         except ValueError:
-            messagebox.showerror("Invalid Interval", "Please enter a valid interval.")
+            messagebox.showerror("Invalid Interval", "Enter a valid interval (in seconds).")
             return
 
         duration_seconds = None
@@ -125,7 +130,7 @@ class VideoComparerApp:
                 if duration_seconds <= 0:
                     raise ValueError()
             except ValueError:
-                messagebox.showerror("Invalid Duration", "Please enter a positive duration.")
+                messagebox.showerror("Invalid Duration", "Enter a positive duration.")
                 return
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -136,127 +141,98 @@ class VideoComparerApp:
         self.progress["value"] = 0
         self.processed_count = 0
         self.total_files = len(self.video_files)
+        self.frame_counts.clear()
+        self.total_frame_estimates.clear()
+        self.stop_requested = False
 
         self.add_button.config(state=tk.DISABLED)
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
         self.status_label.config(text="Processing...")
-        self.stop_requested = False
-        self.ffmpeg_processes.clear()
 
-        for idx, video in enumerate(self.video_files):
-            self.executor.submit(self.process_video, idx, video, interval_seconds, duration_seconds)
+        for idx, file in enumerate(self.video_files):
+            self.executor.submit(self.process_video, idx, file, interval, duration_seconds)
 
-    def process_video(self, idx, video, interval_seconds, duration_seconds):
-        input_path = Path(video)
-        safe_name = input_path.stem.replace(" ", "_")
-        out_dir = self.base_dir / f"{idx:02}_{safe_name}"
+    def process_video(self, idx, file, interval, max_duration):
+        actual_duration = max_duration or self.get_video_duration(file)
+        total_frames = self.estimate_frame_count(actual_duration, interval)
+        self.total_frame_estimates[file] = total_frames
+        self.frame_counts[file] = 0
+
+        input_path = Path(file)
+        out_dir = self.base_dir / f"{idx:02}_{input_path.stem}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        output_pattern = out_dir / f"frame_%03d_{safe_name}.png"
+        output_pattern = out_dir / f"frame_%03d_{input_path.stem}.png"
 
-        max_out_time = duration_seconds or self.get_video_duration(video)
-        duration_arg = ["-t", str(duration_seconds)] if duration_seconds else []
-
-        ffmpeg_cmd = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error",
-            *duration_arg,
-            "-i", str(video),
-            "-vf", f"fps=1/{interval_seconds}",
-            "-progress", "pipe:1",
-            "-nostats",
-            str(output_pattern)
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "info"
         ]
+        if max_duration:
+            cmd += ["-t", str(max_duration)]
+
+        cmd += ["-i", str(file), "-vf", f"fps=1/{interval}", str(output_pattern)]
 
         try:
-            start_time = time.time()
-            process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            self.ffmpeg_processes[str(video)] = process
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+            frame_regex = re.compile(r"frame=\s*(\d+)")
 
             for line in process.stdout:
-                line = line.strip()
-                if line.startswith("out_time_ms"):
-                    value = line.split("=")[1].strip()
-                    current_out_time = self.safe_parse_ms(value) / 1_000_000
-
-                    eta_str = ""
-                    time_str = str(datetime.timedelta(seconds=int(current_out_time)))
-                    percent = 0
-
-                    if max_out_time:
-                        progress = min(current_out_time / max_out_time, 1.0)
-                        percent = int(progress * 100)
-                        elapsed = time.time() - start_time
-                        eta_seconds = int(elapsed / progress - elapsed) if progress > 0 else 0
-                        eta_str = str(datetime.timedelta(seconds=eta_seconds))
-
-                    self.master.after(0, self.update_row_progress, video, percent, time_str, eta_str)
-
-                if "progress=end" in line:
-                    break
+                if "frame=" in line:
+                    match = frame_regex.search(line)
+                    if match:
+                        frame_num = int(match.group(1)) + 1  # Adjust: FFmpeg frames start at 0
+                        self.frame_counts[file] = frame_num
+                        self.master.after(0, self.update_row_progress, file)
 
             process.wait()
+            self.master.after(0, self.mark_video_complete, file)
+
         except Exception as e:
-            print(f"Error while processing {video}: {e}")
-        finally:
-            self.master.after(0, self.handle_video_completion)
+            print(f"Error processing {file}: {e}")
 
-    def safe_parse_ms(self, value):
-        try:
-            if value.lower() == "n/a" or not value:
-                return 0
-            return int(float(value))
-        except:
-            return 0
+    def update_row_progress(self, file_path):
+        row_id = self.row_ids.get(file_path)
+        if not row_id:
+            return
 
-    def update_row_progress(self, filepath, percent, time_txt, eta_txt):
-        row_id = self.row_ids.get(filepath)
-        if row_id:
-            self.tree.set(row_id, "progress", f"{percent}%")
-            self.tree.set(row_id, "time", time_txt)
-            self.tree.set(row_id, "eta", eta_txt)
+        current = self.frame_counts.get(file_path, 0)
+        total = self.total_frame_estimates.get(file_path, 1)
+        percent = min(int((current / total) * 100), 100)
 
+        self.tree.set(row_id, "frames", f"{current} / {total}")
+        self.tree.set(row_id, "progress", f"{percent}%")
         self.update_overall_progress()
 
     def update_overall_progress(self):
-        values = []
-        for row in self.tree.get_children():
-            try:
-                percent = int(self.tree.item(row, "values")[1].replace("%", ""))
-                values.append(percent)
-            except:
-                values.append(0)
+        total_weight = sum(self.total_frame_estimates.values())
+        weighted_progress = sum(
+            min(self.frame_counts.get(path, 0), self.total_frame_estimates.get(path, 0))
+            for path in self.video_files
+        )
 
-        if values:
-            avg = sum(values) / len(values)
-            self.progress["value"] = avg
+        if total_weight > 0:
+            overall = (weighted_progress / total_weight) * 100
+            self.progress["value"] = overall
 
-    def handle_video_completion(self):
+    def mark_video_complete(self, filepath):
         self.processed_count += 1
         self.status_label.config(text=f"Processed {self.processed_count}/{self.total_files}")
 
         if self.processed_count == self.total_files or self.stop_requested:
-            self.status_label.config(text="Done." if not self.stop_requested else "Aborted.")
+            self.status_label.config(text="Done." if not self.stop_requested else "Aborted")
             self.add_button.config(state=tk.NORMAL)
             self.start_button.config(state=tk.NORMAL)
             self.stop_button.config(state=tk.DISABLED)
 
             if not self.stop_requested:
-                messagebox.showinfo("Done", f"Frames saved to:\n{self.base_dir}")
-
-            self.video_files.clear()
-            self.ffmpeg_processes.clear()
-            self.row_ids.clear()
-            self.tree.delete(*self.tree.get_children())
+                messagebox.showinfo("Done", "All videos processed.")
 
     def abort_processing(self):
         self.stop_requested = True
         self.status_label.config(text="Aborting...")
         self.stop_button.config(state=tk.DISABLED)
-
-        for proc in self.ffmpeg_processes.values():
-            if proc.poll() is None:
-                proc.terminate()
 
 
 if __name__ == "__main__":

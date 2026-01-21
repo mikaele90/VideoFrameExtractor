@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from tkinter.scrolledtext import ScrolledText
 from tkinterdnd2 import DND_FILES, TkinterDnD
 import subprocess
 from pathlib import Path
@@ -9,7 +10,7 @@ import re
 import time
 import threading
 
-VERSION = "0.2.2"
+VERSION = "0.3.0"
 
 
 class VideoComparerApp:
@@ -41,6 +42,12 @@ class VideoComparerApp:
         self.lock = threading.Lock()
         self.active_processes = {}
         self.last_update_time = {}
+
+        # Per-file status and console output
+        self.file_status = {}       # file -> status string
+        self.file_output = {}       # file -> list of output lines (last N lines)
+        self.console_tabs = {}      # file -> (tab_frame, text_widget)
+        self.max_console_lines = 100  # Max lines to keep per file
 
         self._build_ui(master)
 
@@ -88,14 +95,30 @@ class VideoComparerApp:
         self.progress.pack(pady=(10, 0), padx=10, fill="x")
 
         # Treeview for per-file tracking
-        self.tree = ttk.Treeview(master, columns=("file", "frames", "progress"), show="headings", height=12)
+        self.tree = ttk.Treeview(master, columns=("file", "frames", "progress", "status"), show="headings", height=8)
         self.tree.heading("file", text="File")
         self.tree.heading("frames", text="Frames")
         self.tree.heading("progress", text="Progress")
-        self.tree.column("file", width=300, anchor="w")
-        self.tree.column("frames", width=120, anchor="center")
-        self.tree.column("progress", width=80, anchor="center")
-        self.tree.pack(padx=10, pady=10, fill="both", expand=True)
+        self.tree.heading("status", text="Status")
+        self.tree.column("file", width=250, anchor="w")
+        self.tree.column("frames", width=100, anchor="center")
+        self.tree.column("progress", width=70, anchor="center")
+        self.tree.column("status", width=180, anchor="w")
+        self.tree.pack(padx=10, pady=(10, 5), fill="both", expand=True)
+
+        # Console notebook for FFmpeg output
+        self.console_frame = tk.LabelFrame(master, text="FFmpeg Console Output")
+        self.console_frame.pack(padx=10, pady=(0, 5), fill="both", expand=True)
+
+        self.console_notebook = ttk.Notebook(self.console_frame)
+        self.console_notebook.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # Placeholder tab when no processes are running
+        self.placeholder_frame = tk.Frame(self.console_notebook)
+        self.placeholder_label = tk.Label(self.placeholder_frame, text="Console output will appear here when processing starts",
+                                          fg="gray")
+        self.placeholder_label.pack(expand=True)
+        self.console_notebook.add(self.placeholder_frame, text="No Active Process")
 
         # Status label
         self.status_label = tk.Label(master, text="Ready")
@@ -104,6 +127,9 @@ class VideoComparerApp:
         # Enable drag-and-drop
         self.tree.drop_target_register(DND_FILES)
         self.tree.dnd_bind("<<Drop>>", self.drop_files)
+
+        # Bind treeview selection to console tab switching
+        self.tree.bind("<<TreeviewSelect>>", self.on_treeview_select)
 
     # File selection
     def add_files(self):
@@ -117,9 +143,94 @@ class VideoComparerApp:
         for file in files:
             if file not in self.video_files and Path(file).suffix.lower() in {'.mp4', '.mkv', '.mov', '.avi', '.flv'}:
                 name = Path(file).name
-                row_id = self.tree.insert("", "end", values=(name, "0 / ?", "0%"))
+                row_id = self.tree.insert("", "end", values=(name, "0 / ?", "0%", "Queued"))
                 self.row_ids[file] = row_id
                 self.video_files.append(file)
+                self.file_status[file] = "Queued"
+                self.file_output[file] = []
+
+    # Console tab management
+    def on_treeview_select(self, event):
+        """Switch to the console tab for the selected file."""
+        selection = self.tree.selection()
+        if not selection:
+            return
+
+        # Find the file path for this row
+        row_id = selection[0]
+        for file, rid in self.row_ids.items():
+            if rid == row_id and file in self.console_tabs:
+                tab_frame, _ = self.console_tabs[file]
+                try:
+                    self.console_notebook.select(tab_frame)
+                except tk.TclError:
+                    pass  # Tab may not exist yet
+                break
+
+    def create_console_tab(self, file):
+        """Create a console tab for a file."""
+        name = Path(file).name
+        # Truncate long names for tab title
+        tab_title = name if len(name) <= 20 else name[:17] + "..."
+
+        tab_frame = tk.Frame(self.console_notebook)
+        text_widget = ScrolledText(tab_frame, height=8, wrap=tk.WORD, font=("Consolas", 9))
+        text_widget.pack(fill="both", expand=True)
+        text_widget.config(state=tk.DISABLED)  # Read-only
+
+        # Remove placeholder tab if it exists
+        try:
+            self.console_notebook.forget(self.placeholder_frame)
+        except tk.TclError:
+            pass
+
+        self.console_notebook.add(tab_frame, text=tab_title)
+        self.console_tabs[file] = (tab_frame, text_widget)
+
+        # Select this tab
+        self.console_notebook.select(tab_frame)
+
+    def append_console_output(self, file, line, is_progress=False):
+        """Append a line to a file's console output."""
+        if file not in self.console_tabs:
+            return
+
+        _, text_widget = self.console_tabs[file]
+        text_widget.config(state=tk.NORMAL)
+
+        if is_progress:
+            # Progress lines: replace the last line instead of appending
+            # Delete from start of last line to end
+            text_widget.delete("end-2l linestart", "end-1c")
+            text_widget.insert(tk.END, line.strip() + "\n")
+        else:
+            # Regular lines: append normally
+            self.file_output[file].append(line)
+            if len(self.file_output[file]) > self.max_console_lines:
+                self.file_output[file] = self.file_output[file][-self.max_console_lines:]
+            text_widget.insert(tk.END, line)
+
+        text_widget.see(tk.END)  # Auto-scroll to bottom
+        text_widget.config(state=tk.DISABLED)
+
+    def update_file_status(self, file, status):
+        """Update the status column for a file."""
+        self.file_status[file] = status
+        row_id = self.row_ids.get(file)
+        if row_id:
+            self.tree.set(row_id, "status", status)
+
+    def close_console_tab(self, file):
+        """Mark a console tab as completed (change tab title)."""
+        if file not in self.console_tabs:
+            return
+        tab_frame, _ = self.console_tabs[file]
+        name = Path(file).name
+        tab_title = name if len(name) <= 18 else name[:15] + "..."
+        try:
+            self.console_notebook.tab(tab_frame, text=f"{tab_title}")
+        except tk.TclError:
+            pass
 
     # Preprocessing
     def get_video_duration(self, path):
@@ -174,6 +285,28 @@ class VideoComparerApp:
         self.processed_files = 0
         self.stop_requested = False
 
+        # Clear console tabs from previous run
+        for file in list(self.console_tabs.keys()):
+            tab_frame, _ = self.console_tabs[file]
+            try:
+                self.console_notebook.forget(tab_frame)
+            except tk.TclError:
+                pass
+        self.console_tabs.clear()
+        self.file_output = {f: [] for f in self.video_files}
+
+        # Re-add placeholder if no tabs
+        try:
+            self.console_notebook.add(self.placeholder_frame, text="No Active Process")
+        except tk.TclError:
+            pass
+
+        # Reset file statuses
+        for file in self.video_files:
+            self.file_status[file] = "Queued"
+            row_id = self.row_ids[file]
+            self.tree.set(row_id, "status", "Queued")
+
         self.status_label.config(text="Scanning...")
         self.add_button.config(state=tk.DISABLED)
         self.start_button.config(state=tk.DISABLED)
@@ -206,6 +339,10 @@ class VideoComparerApp:
         out_dir = self.base_dir / f"{idx:02}_{input_path.stem}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        # Create console tab for this file (must be done on main thread)
+        self.master.after(0, self.create_console_tab, file)
+        self.master.after(0, self.update_file_status, file, "Starting...")
+
         # Set extension and codec options based on format
         if output_format == "WebP (lossless)":
             ext = "webp"
@@ -229,27 +366,95 @@ class VideoComparerApp:
             with self.lock:
                 self.active_processes[file] = proc
 
-            # Regex to extract actual frame number (not just detect)
+            # Enhanced regex patterns
             frame_regex = re.compile(r"frame=\s*(\d+)")
+            time_regex = re.compile(r"time=(\d+:\d+:\d+\.\d+)")
+            time_na_regex = re.compile(r"time=N/A")
+            speed_regex = re.compile(r"speed=\s*([\d.]+)x")
+            elapsed_regex = re.compile(r"elapsed=(\d+:\d+:\d+\.\d+)")
+
+            last_frame = 0
+            last_time = ""
+            last_speed = ""
+            last_elapsed = ""
 
             for line in proc.stdout:
                 # Check if stop was requested
                 if self.stop_requested:
                     proc.terminate()
+                    self.master.after(0, self.update_file_status, file, "Aborted")
                     break
 
-                match = frame_regex.search(line)
-                if match:
-                    # Extract actual frame count from ffmpeg output
-                    frame_received = int(match.group(1))
+                # Detect if this is a progress line (starts with "frame=" after stripping)
+                stripped = line.strip()
+                is_progress_line = stripped.startswith("frame=")
 
+                # Append line to console (on main thread)
+                # Progress lines replace the previous progress line instead of appending
+                self.master.after(0, self.append_console_output, file, line, is_progress_line)
+
+                # Parse frame count
+                frame_match = frame_regex.search(line)
+                if frame_match:
+                    frame_received = int(frame_match.group(1))
                     with self.lock:
                         self.frame_counts[file] = frame_received
+
+                    # Check if we got a new frame (encoding completed)
+                    if frame_received > last_frame:
+                        last_frame = frame_received
+
+                # Parse time position (video timestamp)
+                time_match = time_regex.search(line)
+                if time_match:
+                    last_time = time_match.group(1)
+                    # Truncate microseconds for display
+                    if '.' in last_time:
+                        last_time = last_time.rsplit('.', 1)[0]
+
+                # Check for time=N/A (seeking phase)
+                time_na = time_na_regex.search(line) is not None
+
+                # Parse speed
+                speed_match = speed_regex.search(line)
+                if speed_match:
+                    last_speed = speed_match.group(1)
+
+                # Parse elapsed time
+                elapsed_match = elapsed_regex.search(line)
+                if elapsed_match:
+                    last_elapsed = elapsed_match.group(1)
+                    if '.' in last_elapsed:
+                        last_elapsed = last_elapsed.rsplit('.', 1)[0]
+
+                # Build status string based on current state
+                if frame_match or time_match or time_na:
+                    target = self.frame_targets.get(file, 0)
+
+                    if time_na and last_frame == 0:
+                        # Seeking to first frame
+                        status = f"Seeking to first frame..."
+                        if last_elapsed:
+                            status = f"Seeking... ({last_elapsed})"
+                    elif last_frame < target:
+                        # Processing frames
+                        if last_time:
+                            status = f"Frame {last_frame}/{target} @ {last_time}"
+                        else:
+                            status = f"Encoding frame {last_frame + 1}/{target}"
+                        if last_speed:
+                            status += f" ({last_speed}x)"
+                    else:
+                        # Done with frames, finalizing
+                        status = f"Finalizing..."
+                        if last_speed:
+                            status += f" ({last_speed}x)"
 
                     # Throttle UI updates (max 10 per second per file)
                     current_time = time.time()
                     if current_time - self.last_update_time.get(file, 0) >= 0.1:
                         self.last_update_time[file] = current_time
+                        self.master.after(0, self.update_file_status, file, status)
                         self.master.after(0, self.update_progress, file)
 
             proc.wait()
@@ -258,11 +463,17 @@ class VideoComparerApp:
             with self.lock:
                 self.active_processes.pop(file, None)
 
+            # Final status update
+            if not self.stop_requested:
+                self.master.after(0, self.update_file_status, file, "Done")
+
             # Final UI update to ensure 100% is shown
             self.master.after(0, self.update_progress, file)
             self.master.after(0, self.mark_video_complete, file)
         except Exception as e:
             print(f"Error processing {file}: {e}")
+            self.master.after(0, self.update_file_status, file, f"Error: {str(e)[:30]}")
+            self.master.after(0, self.append_console_output, file, f"\nERROR: {e}\n")
             with self.lock:
                 self.active_processes.pop(file, None)
 
@@ -312,12 +523,22 @@ class VideoComparerApp:
 
         # Terminate all active ffmpeg processes
         with self.lock:
+            active_files = list(self.active_processes.keys())
             for proc in self.active_processes.values():
                 try:
                     proc.terminate()
                 except Exception:
                     pass
             self.active_processes.clear()
+
+        # Update status for aborted files
+        for file in active_files:
+            self.update_file_status(file, "Aborted")
+
+        # Also mark queued files as not started
+        for file in self.video_files:
+            if self.file_status.get(file) == "Queued":
+                self.update_file_status(file, "Cancelled")
 
     def on_close(self):
         """Clean up resources when window is closed."""

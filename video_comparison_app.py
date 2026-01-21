@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import math
 import re
 import time
+import threading
 
 
 class VideoComparerApp:
@@ -26,7 +27,15 @@ class VideoComparerApp:
         self.processed_files = 0
         self.stop_requested = False
 
+        # Thread safety and process management
+        self.lock = threading.Lock()
+        self.active_processes = {}
+        self.last_update_time = {}
+
         self._build_ui(master)
+
+        # Handle window close
+        self.master.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def _build_ui(self, master):
         # Top control panel
@@ -55,6 +64,14 @@ class VideoComparerApp:
         self.duration_var = tk.StringVar(value="")
         self.duration_entry = tk.Entry(self.frame, textvariable=self.duration_var, width=7)
         self.duration_entry.pack(side=tk.LEFT)
+
+        self.format_label = tk.Label(self.frame, text="Format:")
+        self.format_label.pack(side=tk.LEFT, padx=(20, 5))
+
+        self.format_var = tk.StringVar(value="PNG")
+        self.format_combo = ttk.Combobox(self.frame, textvariable=self.format_var,
+                                          values=["PNG", "WebP (lossless)"], state="readonly", width=12)
+        self.format_combo.pack(side=tk.LEFT, padx=(0, 5))
 
         # Progress bar
         self.progress = ttk.Progressbar(master, orient="horizontal", length=500, mode="determinate")
@@ -109,7 +126,7 @@ class VideoComparerApp:
 
     def estimate_frame_count(self, duration, interval):
         if duration and interval:
-            return max(1, math.floor(duration / interval) + 1)
+            return max(1, math.ceil(duration / interval))
         return 0
 
     # Processing
@@ -170,39 +187,84 @@ class VideoComparerApp:
             self.tree.set(row_id, "progress", "0%")
 
         self.status_label.config(text="Processing...")
+        output_format = self.format_var.get()
         for idx, file in enumerate(self.video_files):
-            self.executor.submit(self.process_video, idx, file, interval, max_duration)
+            self.executor.submit(self.process_video, idx, file, interval, max_duration, output_format)
 
-    def process_video(self, idx, file, interval, max_duration):
+    def process_video(self, idx, file, interval, max_duration, output_format):
         input_path = Path(file)
         out_dir = self.base_dir / f"{idx:02}_{input_path.stem}"
         out_dir.mkdir(parents=True, exist_ok=True)
-        output_pattern = out_dir / f"frame_%03d_{input_path.stem}.png"
+
+        # Set extension and codec options based on format
+        if output_format == "WebP (lossless)":
+            ext = "webp"
+            codec_opts = ["-lossless", "1", "-compression_level", "4"]
+        else:  # PNG
+            ext = "png"
+            codec_opts = ["-compression_level", "5"]
+
+        output_pattern = out_dir / f"frame_%03d_{input_path.stem}.{ext}"
 
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "info"]
         if max_duration:
-            cmd += ["-t", str(max_duration)]
-        cmd += ["-i", str(file), "-vf", f"fps=1/{interval}", str(output_pattern)]
+            # Add small buffer to ensure frames at boundary are captured
+            cmd += ["-t", str(max_duration + 0.5)]
+        cmd += ["-i", str(file), "-vf", f"fps=1/{interval}"] + codec_opts + [str(output_pattern)]
 
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+            # Track process for potential abort
+            with self.lock:
+                self.active_processes[file] = proc
+
+            # Regex to extract actual frame number (not just detect)
             frame_regex = re.compile(r"frame=\s*(\d+)")
+
             for line in proc.stdout:
+                # Check if stop was requested
+                if self.stop_requested:
+                    proc.terminate()
+                    break
+
                 match = frame_regex.search(line)
                 if match:
-                    count = int(match.group(1)) + 1
-                    self.frame_counts[file] = count
-                    self.master.after(0, self.update_progress, file)
+                    # Extract actual frame count from ffmpeg output
+                    frame_received = int(match.group(1))
+
+                    with self.lock:
+                        self.frame_counts[file] = frame_received
+
+                    # Throttle UI updates (max 10 per second per file)
+                    current_time = time.time()
+                    if current_time - self.last_update_time.get(file, 0) >= 0.1:
+                        self.last_update_time[file] = current_time
+                        self.master.after(0, self.update_progress, file)
+
             proc.wait()
+
+            # Remove from active processes
+            with self.lock:
+                self.active_processes.pop(file, None)
+
+            # Final UI update to ensure 100% is shown
+            self.master.after(0, self.update_progress, file)
             self.master.after(0, self.mark_video_complete, file)
         except Exception as e:
             print(f"Error processing {file}: {e}")
+            with self.lock:
+                self.active_processes.pop(file, None)
 
     def update_progress(self, file):
-        current = self.frame_counts.get(file, 0)
-        target = self.frame_targets.get(file, 1)
+        with self.lock:
+            current = self.frame_counts.get(file, 0)
+        target = max(self.frame_targets.get(file, 1), 1)  # Prevent division by zero
         percent = min(int((current / target) * 100), 100)
-        row_id = self.row_ids[file]
+        row_id = self.row_ids.get(file)
+
+        if row_id is None:
+            return
 
         display_current = min(current, target)
         self.tree.set(row_id, "frames", f"{display_current} / {target}")
@@ -211,18 +273,21 @@ class VideoComparerApp:
         self.update_global_progress()
 
     def update_global_progress(self):
-        total_done = sum(min(self.frame_counts.get(fp, 0), self.frame_targets.get(fp, 0)) for fp in self.video_files)
+        with self.lock:
+            total_done = sum(min(self.frame_counts.get(fp, 0), self.frame_targets.get(fp, 0)) for fp in self.video_files)
         if self.total_expected_frames > 0:
             pct = (total_done / self.total_expected_frames) * 100
             self.progress["value"] = pct
 
     def mark_video_complete(self, file):
-        self.processed_files += 1
-        self.status_label.config(
-            text=f"Processed {self.processed_files}/{len(self.video_files)}"
-        )
+        with self.lock:
+            self.processed_files += 1
+            processed = self.processed_files
+            total = len(self.video_files)
 
-        if self.processed_files == len(self.video_files) or self.stop_requested:
+        self.status_label.config(text=f"Processed {processed}/{total}")
+
+        if processed == total or self.stop_requested:
             self.status_label.config(text="Done." if not self.stop_requested else "Aborted")
             self.add_button.config(state=tk.NORMAL)
             self.start_button.config(state=tk.NORMAL)
@@ -234,6 +299,31 @@ class VideoComparerApp:
         self.stop_requested = True
         self.status_label.config(text="Aborting...")
         self.stop_button.config(state=tk.DISABLED)
+
+        # Terminate all active ffmpeg processes
+        with self.lock:
+            for proc in self.active_processes.values():
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            self.active_processes.clear()
+
+    def on_close(self):
+        """Clean up resources when window is closed."""
+        self.stop_requested = True
+
+        # Terminate any running processes
+        with self.lock:
+            for proc in self.active_processes.values():
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
+        # Shutdown thread pool
+        self.executor.shutdown(wait=False)
+        self.master.destroy()
 
 
 if __name__ == "__main__":

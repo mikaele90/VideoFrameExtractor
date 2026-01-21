@@ -7,16 +7,23 @@ A GUI tool for extracting frames from video files at fixed intervals.
 - Drag and drop or browse for video files
 - Configurable extraction interval (in seconds)
 - Optional maximum duration limit
-- Output format: PNG or WebP (lossless)
+- Output format: PNG or WebP (lossless) with adjustable compression
 - Processes multiple files concurrently
+- Live FFmpeg console output and per-file status tracking
+- Right-click context menu (Play, Open File Location, etc.)
 - Organizes output into per-video folders
 
 ## Requirements
 
-- Python 3.x
 - FFmpeg (must be in PATH)
 
 ## Installation
+
+### Option 1: Download Executable (Windows)
+
+Download the latest `.exe` from the [Releases](https://github.com/mikaele90/VideoFrameExtractor/releases) page. No Python installation required.
+
+### Option 2: Run from Source
 
 1. Clone the repository
 

@@ -9,7 +9,7 @@ import re
 import time
 import threading
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 
 
 class VideoComparerApp:
@@ -17,6 +17,14 @@ class VideoComparerApp:
         self.master = master
         self.master.title(f"Video Frame Extractor v{VERSION}")
         self.master.resizable(True, True)
+
+        # Set window icon
+        try:
+            icon_path = Path(__file__).parent / "app.ico"
+            if icon_path.exists():
+                self.master.iconbitmap(str(icon_path))
+        except Exception:
+            pass
 
         # Setup
         self.executor = ThreadPoolExecutor(max_workers=4)

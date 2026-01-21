@@ -5,6 +5,7 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 import subprocess
 import os
 import sys
+import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import math
@@ -12,7 +13,59 @@ import re
 import time
 import threading
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
+
+# Config file for storing FFmpeg path
+CONFIG_FILE = Path(__file__).parent / "config.json"
+
+
+def load_config():
+    """Load configuration from file."""
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_config(config):
+    """Save configuration to file."""
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+    except Exception:
+        pass
+
+
+def check_ffmpeg(ffmpeg_path="ffmpeg"):
+    """Check if FFmpeg is available and return version string or None."""
+    try:
+        result = subprocess.run(
+            [ffmpeg_path, "-version"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+        )
+        if result.returncode == 0:
+            # Parse version from first line, e.g., "ffmpeg version 6.1.1 ..."
+            first_line = result.stdout.split('\n')[0]
+            match = re.search(r'ffmpeg version (\S+)', first_line)
+            if match:
+                return match.group(1)
+            return "unknown"
+        return None
+    except Exception:
+        return None
+
+
+def get_ffprobe_path(ffmpeg_path):
+    """Derive ffprobe path from ffmpeg path."""
+    ffmpeg_path = Path(ffmpeg_path)
+    if ffmpeg_path.name.lower() in ('ffmpeg', 'ffmpeg.exe'):
+        ffprobe_name = 'ffprobe.exe' if sys.platform == 'win32' else 'ffprobe'
+        return str(ffmpeg_path.parent / ffprobe_name)
+    return "ffprobe"  # Fallback to PATH
 
 
 class VideoComparerApp:
@@ -53,10 +106,99 @@ class VideoComparerApp:
         self.max_console_lines = 100  # Max lines to keep per file
         self.base_dir = None        # Base output directory for current run
 
+        # FFmpeg paths and version
+        self.ffmpeg_path = "ffmpeg"
+        self.ffprobe_path = "ffprobe"
+        self.ffmpeg_version = None
+
         self._build_ui(master)
 
         # Handle window close
         self.master.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # Check FFmpeg availability after UI is built
+        self.master.after(100, self._check_ffmpeg_on_startup)
+
+    def _check_ffmpeg_on_startup(self):
+        """Check for FFmpeg on startup and prompt if not found."""
+        # First, try loading from config
+        config = load_config()
+        if 'ffmpeg_path' in config:
+            version = check_ffmpeg(config['ffmpeg_path'])
+            if version:
+                self.ffmpeg_path = config['ffmpeg_path']
+                self.ffprobe_path = get_ffprobe_path(config['ffmpeg_path'])
+                self.ffmpeg_version = version
+                self._update_ffmpeg_label()
+                return
+
+        # Try default PATH
+        version = check_ffmpeg("ffmpeg")
+        if version:
+            self.ffmpeg_path = "ffmpeg"
+            self.ffprobe_path = "ffprobe"
+            self.ffmpeg_version = version
+            self._update_ffmpeg_label()
+            return
+
+        # Not found - prompt user
+        self._prompt_for_ffmpeg()
+
+    def _prompt_for_ffmpeg(self):
+        """Prompt the user to locate FFmpeg."""
+        result = messagebox.askyesno(
+            "FFmpeg Not Found",
+            "FFmpeg was not found in your system PATH.\n\n"
+            "Would you like to browse for the FFmpeg executable?\n\n"
+            "You can download FFmpeg from: https://ffmpeg.org/download.html"
+        )
+
+        if result:
+            self._browse_for_ffmpeg()
+        else:
+            self.status_label.config(text="FFmpeg not configured - processing disabled")
+            self.start_button.config(state=tk.DISABLED)
+            self.add_button.config(state=tk.DISABLED)
+
+    def _browse_for_ffmpeg(self):
+        """Open file dialog to locate FFmpeg executable."""
+        if sys.platform == 'win32':
+            filetypes = [("Executable", "ffmpeg.exe"), ("All files", "*.*")]
+        else:
+            filetypes = [("All files", "*")]
+
+        ffmpeg_path = filedialog.askopenfilename(
+            title="Locate FFmpeg executable",
+            filetypes=filetypes
+        )
+
+        if ffmpeg_path:
+            version = check_ffmpeg(ffmpeg_path)
+            if version:
+                self.ffmpeg_path = ffmpeg_path
+                self.ffprobe_path = get_ffprobe_path(ffmpeg_path)
+                self.ffmpeg_version = version
+                self._update_ffmpeg_label()
+
+                # Save to config
+                config = load_config()
+                config['ffmpeg_path'] = ffmpeg_path
+                save_config(config)
+
+                messagebox.showinfo("Success", f"FFmpeg {version} configured successfully!")
+            else:
+                messagebox.showerror("Error", "The selected file is not a valid FFmpeg executable.")
+                self._prompt_for_ffmpeg()
+        else:
+            # User cancelled
+            self.status_label.config(text="FFmpeg not configured - processing disabled")
+            self.start_button.config(state=tk.DISABLED)
+            self.add_button.config(state=tk.DISABLED)
+
+    def _update_ffmpeg_label(self):
+        """Update the FFmpeg version label in the UI."""
+        if self.ffmpeg_version:
+            self.ffmpeg_label.config(text=f"FFmpeg {self.ffmpeg_version}")
 
     def _build_ui(self, master):
         # Top control panel
@@ -164,9 +306,17 @@ class VideoComparerApp:
         self.placeholder_label.pack(expand=True)
         self.console_notebook.add(self.placeholder_frame, text="No Active Process")
 
-        # Status label
-        self.status_label = tk.Label(master, text="Ready")
-        self.status_label.pack(pady=(0, 10), padx=10, anchor="w")
+        # Status bar frame
+        self.status_frame = tk.Frame(master)
+        self.status_frame.pack(fill="x", pady=(0, 10), padx=10)
+
+        # Status label (left)
+        self.status_label = tk.Label(self.status_frame, text="Ready")
+        self.status_label.pack(side=tk.LEFT)
+
+        # FFmpeg version label (right)
+        self.ffmpeg_label = tk.Label(self.status_frame, text="", fg="gray")
+        self.ffmpeg_label.pack(side=tk.RIGHT)
 
         # Enable drag-and-drop
         self.tree.drop_target_register(DND_FILES)
@@ -417,7 +567,7 @@ class VideoComparerApp:
     def get_video_duration(self, path):
         try:
             result = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                [self.ffprobe_path, "-v", "error", "-show_entries", "format=duration",
                  "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
             )
@@ -541,7 +691,7 @@ class VideoComparerApp:
 
         output_pattern = out_dir / f"frame_%03d_{input_path.stem}.{ext}"
 
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "info"]
+        cmd = [self.ffmpeg_path, "-hide_banner", "-loglevel", "info"]
         if max_duration:
             # Add small buffer to ensure frames at boundary are captured
             cmd += ["-t", str(max_duration + 0.5)]

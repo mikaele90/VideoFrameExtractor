@@ -3,6 +3,8 @@ from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from tkinterdnd2 import DND_FILES, TkinterDnD
 import subprocess
+import os
+import sys
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import math
@@ -10,7 +12,7 @@ import re
 import time
 import threading
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 
 class VideoComparerApp:
@@ -46,8 +48,10 @@ class VideoComparerApp:
         # Per-file status and console output
         self.file_status = {}       # file -> status string
         self.file_output = {}       # file -> list of output lines (last N lines)
+        self.file_out_dirs = {}     # file -> output directory path
         self.console_tabs = {}      # file -> (tab_frame, text_widget)
         self.max_console_lines = 100  # Max lines to keep per file
+        self.base_dir = None        # Base output directory for current run
 
         self._build_ui(master)
 
@@ -62,11 +66,14 @@ class VideoComparerApp:
         self.add_button = tk.Button(self.frame, text="Add Videos", command=self.add_files)
         self.add_button.pack(side=tk.LEFT, padx=5)
 
-        self.start_button = tk.Button(self.frame, text="Start", command=self.start_comparison)
+        self.start_button = tk.Button(self.frame, text="Start", command=self.start_comparison, state=tk.DISABLED)
         self.start_button.pack(side=tk.LEFT, padx=5)
 
         self.stop_button = tk.Button(self.frame, text="Stop", command=self.abort_processing, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=5)
+
+        self.open_output_button = tk.Button(self.frame, text="Open Output", command=self.open_output_folder, state=tk.DISABLED)
+        self.open_output_button.pack(side=tk.LEFT, padx=5)
 
         self.interval_label = tk.Label(self.frame, text="Interval (s):")
         self.interval_label.pack(side=tk.LEFT, padx=(20, 5))
@@ -89,6 +96,43 @@ class VideoComparerApp:
         self.format_combo = ttk.Combobox(self.frame, textvariable=self.format_var,
                                           values=["PNG", "WebP (lossless)"], state="readonly", width=12)
         self.format_combo.pack(side=tk.LEFT, padx=(0, 5))
+        self.format_combo.bind("<<ComboboxSelected>>", self.on_format_change)
+
+        # Compression level dropdown
+        self.compression_label = tk.Label(self.frame, text="Compression:")
+        self.compression_label.pack(side=tk.LEFT, padx=(10, 5))
+
+        self.compression_var = tk.StringVar()
+        self.compression_combo = ttk.Combobox(self.frame, textvariable=self.compression_var,
+                                               state="readonly", width=22)
+        self.compression_combo.pack(side=tk.LEFT, padx=(0, 5))
+
+        # Compression options per format
+        self.png_compression_options = [
+            "0 [None - Fastest]",
+            "1 [Very Low]",
+            "2 [Low]",
+            "3 [Low-Medium]",
+            "4 [Medium]",
+            "5 [Medium - Default]",
+            "6 [Medium-High]",
+            "7 [High]",
+            "8 [Very High]",
+            "9 [Maximum - Slowest]"
+        ]
+        self.webp_compression_options = [
+            "0 [Fastest]",
+            "1 [Very Fast]",
+            "2 [Fast]",
+            "3 [Medium]",
+            "4 [Medium - Default]",
+            "5 [Slow]",
+            "6 [Slowest - Best]"
+        ]
+
+        # Initialize with PNG options
+        self.compression_combo["values"] = self.png_compression_options
+        self.compression_var.set(self.png_compression_options[5])  # Default: 5
 
         # Progress bar
         self.progress = ttk.Progressbar(master, orient="horizontal", length=500, mode="determinate")
@@ -131,6 +175,139 @@ class VideoComparerApp:
         # Bind treeview selection to console tab switching
         self.tree.bind("<<TreeviewSelect>>", self.on_treeview_select)
 
+        # Context menu for file operations
+        self.tree_context_menu = tk.Menu(self.tree, tearoff=0)
+        self.tree_context_menu.add_command(label="Play", command=self.play_selected_file)
+        self.tree_context_menu.add_command(label="Open File Location", command=self.open_file_location)
+        self.tree_context_menu.add_separator()
+        self.tree_context_menu.add_command(label="Open Extraction Folder", command=self.open_extraction_folder)
+        self.tree_context_menu.add_separator()
+        self.tree_context_menu.add_command(label="Remove", command=self.remove_selected_files)
+        self.tree.bind("<Button-3>", self.show_tree_context_menu)
+        self.tree.bind("<Delete>", lambda e: self.remove_selected_files())
+
+    def on_format_change(self, event=None):
+        """Update compression options when format changes."""
+        if self.format_var.get() == "PNG":
+            self.compression_combo["values"] = self.png_compression_options
+            self.compression_var.set(self.png_compression_options[5])  # Default: 5
+        else:  # WebP
+            self.compression_combo["values"] = self.webp_compression_options
+            self.compression_var.set(self.webp_compression_options[4])  # Default: 4
+
+    def show_tree_context_menu(self, event):
+        """Show context menu on right-click."""
+        # Select the item under cursor
+        item = self.tree.identify_row(event.y)
+        if item:
+            self.tree.selection_set(item)
+
+            # Enable/disable extraction folder option based on existence
+            file = self.get_selected_file()
+            extraction_exists = file and file in self.file_out_dirs and self.file_out_dirs[file].exists()
+
+            # Index 3 = "Open Extraction Folder"
+            self.tree_context_menu.entryconfig(3, state=tk.NORMAL if extraction_exists else tk.DISABLED)
+
+            self.tree_context_menu.post(event.x_root, event.y_root)
+
+    def get_selected_file(self):
+        """Get the file path for the first selected item."""
+        selection = self.tree.selection()
+        if not selection:
+            return None
+        row_id = selection[0]
+        for file, rid in self.row_ids.items():
+            if rid == row_id:
+                return file
+        return None
+
+    def play_selected_file(self):
+        """Play the selected video with default player."""
+        file = self.get_selected_file()
+        if not file:
+            return
+
+        if sys.platform == 'win32':
+            os.startfile(file)
+        elif sys.platform == 'darwin':  # macOS
+            subprocess.run(['open', file])
+        else:  # Linux and others
+            subprocess.run(['xdg-open', file])
+
+    def open_file_location(self):
+        """Open file manager with the file selected."""
+        file = self.get_selected_file()
+        if not file:
+            return
+        self._open_in_file_manager(file, select_file=True)
+
+    def open_extraction_folder(self):
+        """Open the extraction folder for the selected file."""
+        file = self.get_selected_file()
+        if file and file in self.file_out_dirs:
+            folder = self.file_out_dirs[file]
+            if folder.exists():
+                self._open_in_file_manager(str(folder))
+
+    def open_output_folder(self):
+        """Open the main output folder."""
+        if self.base_dir and self.base_dir.exists():
+            self._open_in_file_manager(str(self.base_dir))
+
+    def _open_in_file_manager(self, path, select_file=False):
+        """Open path in the system file manager."""
+        if sys.platform == 'win32':
+            normalized_path = os.path.normpath(path)
+            if select_file:
+                subprocess.run(f'explorer /select,"{normalized_path}"', shell=True)
+            else:
+                subprocess.run(f'explorer "{normalized_path}"', shell=True)
+        elif sys.platform == 'darwin':  # macOS
+            if select_file:
+                subprocess.run(['open', '-R', path])
+            else:
+                subprocess.run(['open', path])
+        else:  # Linux
+            if select_file:
+                # Try nautilus (GNOME) with select
+                result = subprocess.run(['nautilus', '--select', path], capture_output=True)
+                if result.returncode != 0:
+                    # Try dolphin (KDE)
+                    result = subprocess.run(['dolphin', '--select', path], capture_output=True)
+                if result.returncode != 0:
+                    # Fall back to just opening the containing folder
+                    subprocess.run(['xdg-open', str(Path(path).parent)])
+            else:
+                subprocess.run(['xdg-open', path])
+
+    def remove_selected_files(self):
+        """Remove selected files from the list."""
+        selection = self.tree.selection()
+        if not selection:
+            return
+
+        # Find and remove the files
+        for row_id in selection:
+            # Find the file path for this row
+            file_to_remove = None
+            for file, rid in self.row_ids.items():
+                if rid == row_id:
+                    file_to_remove = file
+                    break
+
+            if file_to_remove:
+                # Remove from all data structures
+                self.video_files.remove(file_to_remove)
+                del self.row_ids[file_to_remove]
+                self.file_status.pop(file_to_remove, None)
+                self.file_output.pop(file_to_remove, None)
+                self.tree.delete(row_id)
+
+        # Disable Start button if no videos left
+        if not self.video_files:
+            self.start_button.config(state=tk.DISABLED)
+
     # File selection
     def add_files(self):
         files = filedialog.askopenfilenames(filetypes=[("Videos", "*.mp4 *.mkv *.mov *.avi *.flv")])
@@ -148,6 +325,10 @@ class VideoComparerApp:
                 self.video_files.append(file)
                 self.file_status[file] = "Queued"
                 self.file_output[file] = []
+
+        # Enable Start button if we have videos
+        if self.video_files:
+            self.start_button.config(state=tk.NORMAL)
 
     # Console tab management
     def on_treeview_select(self, event):
@@ -294,6 +475,7 @@ class VideoComparerApp:
                 pass
         self.console_tabs.clear()
         self.file_output = {f: [] for f in self.video_files}
+        self.file_out_dirs.clear()
 
         # Re-add placeholder if no tabs
         try:
@@ -316,6 +498,7 @@ class VideoComparerApp:
         # Estimate all frames to be captured
         self.base_dir = Path.cwd() / f"out_{int(time.time())}"
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.open_output_button.config(state=tk.NORMAL)
 
         for file in self.video_files:
             actual_duration = self.get_video_duration(file)
@@ -331,13 +514,18 @@ class VideoComparerApp:
 
         self.status_label.config(text="Processing...")
         output_format = self.format_var.get()
+        # Extract compression level number from selection (e.g., "5 [Medium - Default]" -> "5")
+        compression_level = self.compression_var.get().split()[0]
         for idx, file in enumerate(self.video_files):
-            self.executor.submit(self.process_video, idx, file, interval, max_duration, output_format)
+            self.executor.submit(self.process_video, idx, file, interval, max_duration, output_format, compression_level)
 
-    def process_video(self, idx, file, interval, max_duration, output_format):
+    def process_video(self, idx, file, interval, max_duration, output_format, compression_level):
         input_path = Path(file)
         out_dir = self.base_dir / f"{idx:02}_{input_path.stem}"
         out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Track output directory for this file
+        self.file_out_dirs[file] = out_dir
 
         # Create console tab for this file (must be done on main thread)
         self.master.after(0, self.create_console_tab, file)
@@ -346,10 +534,10 @@ class VideoComparerApp:
         # Set extension and codec options based on format
         if output_format == "WebP (lossless)":
             ext = "webp"
-            codec_opts = ["-lossless", "1", "-compression_level", "4"]
+            codec_opts = ["-lossless", "1", "-compression_level", compression_level]
         else:  # PNG
             ext = "png"
-            codec_opts = ["-compression_level", "5"]
+            codec_opts = ["-compression_level", compression_level]
 
         output_pattern = out_dir / f"frame_%03d_{input_path.stem}.{ext}"
 

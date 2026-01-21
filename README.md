@@ -4,18 +4,15 @@ A GUI tool for extracting frames from video files at fixed intervals.
 
 ## Features
 
-- Drag and drop or browse for video files
-- Configurable extraction interval (in seconds)
-- Optional maximum duration limit
-- Output format: PNG or WebP (lossless) with adjustable compression
-- Processes multiple files concurrently
-- Live FFmpeg console output and per-file status tracking
-- Right-click context menu (Play, Open File Location, etc.)
-- Organizes output into per-video folders
+- Drag-and-drop or browse for video files
+- Configurable extraction interval and max duration
+- PNG or WebP (lossless) output with adjustable compression
+- Batch processing with concurrent extraction
+- Live FFmpeg console output and per-file progress tracking
 
 ## Requirements
 
-- FFmpeg (must be in PATH)
+- FFmpeg (will prompt to browse if not in PATH)
 
 ## Installation
 

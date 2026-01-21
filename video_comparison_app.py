@@ -9,11 +9,13 @@ import re
 import time
 import threading
 
+VERSION = "0.2.0"
+
 
 class VideoComparerApp:
     def __init__(self, master):
         self.master = master
-        self.master.title("Video Frame Comparer")
+        self.master.title(f"Video Frame Extractor v{VERSION}")
         self.master.resizable(True, True)
 
         # Setup

@@ -74,9 +74,12 @@ class VideoComparerApp:
         self.master.title(f"Video Frame Extractor v{VERSION}")
         self.master.resizable(True, True)
 
-        # Set window icon
+        # Set window icon (handle PyInstaller bundle)
         try:
-            icon_path = Path(__file__).parent / "app.ico"
+            if getattr(sys, 'frozen', False):
+                icon_path = Path(sys._MEIPASS) / "app.ico"
+            else:
+                icon_path = Path(__file__).parent / "app.ico"
             if icon_path.exists():
                 self.master.iconbitmap(str(icon_path))
         except Exception:

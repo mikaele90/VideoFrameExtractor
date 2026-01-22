@@ -49,14 +49,26 @@ jobs:
         with:
           name: VideoFrameExtractor-windows
 
-      - name: Create source archive
+      - name: Install 7-Zip
+        run: sudo apt-get install -y p7zip-full
+
+      - name: Create release package
         run: |
-          zip -r VideoFrameExtractor-source.zip . -x ".git/*" -x ".github/*" -x ".venv/*" -x "__pycache__/*" -x "*.pyc" -x ".claude/*"
+          # Create versioned folder (e.g., VideoFrameExtractor_v0.4.1)
+          FOLDER_NAME="VideoFrameExtractor_${{ github.ref_name }}"
+          mkdir -p "$FOLDER_NAME"
+
+          # Copy executable to folder
+          mv VideoFrameExtractor.exe "$FOLDER_NAME/"
+
+          # Create default config.json with empty settings
+          echo '{}' > "$FOLDER_NAME/config.json"
+
+          # Create 7z archive with maximum compression
+          7z a -mx=9 "${FOLDER_NAME}.7z" "$FOLDER_NAME"
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: |
-            VideoFrameExtractor.exe
-            VideoFrameExtractor-source.zip
+          files: VideoFrameExtractor_${{ github.ref_name }}.7z
           generate_release_notes: true

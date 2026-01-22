@@ -18,7 +18,7 @@ A GUI tool for extracting frames from video files at fixed intervals.
 
 ### Option 1: Download Executable (Windows)
 
-Download the latest `.exe` from the [Releases](https://github.com/mikaele90/VideoFrameExtractor/releases) page. No Python installation required.
+Download the latest `.7z` archive from the [Releases](https://github.com/mikaele90/VideoFrameExtractor/releases) page, extract the folder, and run `VideoFrameExtractor.exe`. No Python installation required.
 
 ### Option 2: Run from Source
 
